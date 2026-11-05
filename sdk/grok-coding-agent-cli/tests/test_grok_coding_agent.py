@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -76,6 +77,15 @@ class WorkspaceTest(unittest.TestCase):
 
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(result["stdout"].splitlines(), [str(self.root.resolve()), "missing"])
+
+    @unittest.skipIf(os.name == "nt", "uses a POSIX shell")
+    def test_shell_timeout_stops_child_processes(self) -> None:
+        command = "sh -c 'sleep 2; touch survived.txt'; true"
+        with self.assertRaisesRegex(WorkspaceError, "timed out after 1 seconds"):
+            self.workspace.run_shell(command, timeout_seconds=1)
+
+        time.sleep(2.5)
+        self.assertFalse((self.root / "survived.txt").exists())
 
     def test_dispatch_returns_errors_to_the_model(self) -> None:
         result = json.loads(self.workspace.execute("read_file", {"path": "../outside.txt"}))

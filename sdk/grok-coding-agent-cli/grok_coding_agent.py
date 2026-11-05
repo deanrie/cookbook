@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -179,31 +180,42 @@ class Workspace:
         environment = os.environ.copy()
         environment.pop("XAI_API_KEY", None)
 
-        try:
-            # This deliberately provides normal shell syntax for a compact teaching
-            # example. The README explains that cwd is not a security sandbox.
-            completed = subprocess.run(
-                command,
-                cwd=self.root,
-                env=environment,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as error:
-            stdout = _coerce_subprocess_output(error.stdout)
-            stderr = _coerce_subprocess_output(error.stderr)
-            raise WorkspaceError(
-                f"Shell command timed out after {timeout_seconds} seconds. "
-                f"Partial stdout: {_clip(stdout)} Partial stderr: {_clip(stderr)}"
-            ) from error
+        # This deliberately provides normal shell syntax for a compact teaching
+        # example. The README explains that cwd is not a security sandbox.
+        # On POSIX the shell gets its own process group so a timeout can stop
+        # every process it started, not only the shell itself.
+        with subprocess.Popen(
+            command,
+            cwd=self.root,
+            env=environment,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=os.name != "nt",
+        ) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired as error:
+                _kill_process_group(process)
+                try:
+                    stdout, stderr = process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    stdout = _coerce_subprocess_output(error.stdout)
+                    stderr = _coerce_subprocess_output(error.stderr)
+                raise WorkspaceError(
+                    f"Shell command timed out after {timeout_seconds} seconds. "
+                    f"Partial stdout: {_clip(stdout)} Partial stderr: {_clip(stderr)}"
+                ) from error
+            except BaseException:
+                # The group no longer receives the terminal's Ctrl-C, so stop it here.
+                _kill_process_group(process)
+                raise
 
-        stdout, stdout_truncated = _clip_with_status(completed.stdout)
-        stderr, stderr_truncated = _clip_with_status(completed.stderr)
+        stdout, stdout_truncated = _clip_with_status(stdout)
+        stderr, stderr_truncated = _clip_with_status(stderr)
         return {
-            "exit_code": completed.returncode,
+            "exit_code": process.returncode,
             "stdout": stdout,
             "stderr": stderr,
             "output_truncated": stdout_truncated or stderr_truncated,
@@ -573,6 +585,16 @@ def _clip_with_status(value: str) -> tuple[str, bool]:
     if len(value) <= MAX_SHELL_OUTPUT_CHARS:
         return value, False
     return f"{value[:MAX_SHELL_OUTPUT_CHARS]}\n... output truncated ...", True
+
+
+def _kill_process_group(process: subprocess.Popen[str]) -> None:
+    if os.name == "nt":
+        process.kill()
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        process.kill()
 
 
 def _coerce_subprocess_output(value: str | bytes | None) -> str:
