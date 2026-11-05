@@ -35,11 +35,12 @@ function readStdin() {
   });
 }
 
-function gitLines(args) {
+// -z prints raw NUL-separated paths. Without it git quotes and escapes names with
+// non-ASCII or special characters, and the quoted names never match a mapping.
+function gitPaths(args) {
   try {
-    return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-      .split("\n")
-      .map((line) => line.trim())
+    return execFileSync("git", [...args, "-z"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+      .split("\0")
       .filter(Boolean);
   } catch {
     return [];
@@ -47,8 +48,8 @@ function gitLines(args) {
 }
 
 function changedFiles() {
-  const tracked = gitLines(["diff", "--name-only", "HEAD"]);
-  const untracked = gitLines(["ls-files", "--others", "--exclude-standard"]);
+  const tracked = gitPaths(["diff", "--name-only", "HEAD"]);
+  const untracked = gitPaths(["ls-files", "--others", "--exclude-standard"]);
   return [...new Set([...tracked, ...untracked])].sort();
 }
 
